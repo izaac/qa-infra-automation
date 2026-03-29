@@ -1,0 +1,85 @@
+- name: Map helm repo to chart URL
+  ansible.builtin.set_fact:
+    rancher_chart_url: >-
+      {%- if rancher_helm_repo == 'rancher-prime' -%}
+        https://charts.rancher.com/server-charts/prime
+      {%- elif rancher_helm_repo == 'rancher-latest' -%}
+        https://charts.optimus.rancher.io/server-charts/latest
+      {%- elif rancher_helm_repo == 'rancher-alpha' -%}
+        https://charts.optimus.rancher.io/server-charts/alpha
+      {%- elif rancher_helm_repo == 'rancher-com-alpha' -%}
+        https://releases.rancher.com/server-charts/alpha
+      {%- elif rancher_helm_repo == 'rancher-community' -%}
+        https://releases.rancher.com/server-charts/stable
+      {%- else -%}
+        https://releases.rancher.com/server-charts/latest
+      {%- endif -%}
+    rancher_chart_repo: "{{ rancher_helm_repo | default('rancher-com-rc') }}"
+    rancher_image: >-
+      {%- if rancher_helm_repo == 'rancher-prime' -%}
+        registry.suse.com/rancher/rancher
+      {%- elif rancher_helm_repo in ['rancher-latest', 'rancher-alpha'] -%}
+        stgregistry.suse.com/rancher/rancher
+      {%- else -%}
+      {%- endif -%}
+
+- name: Add helm repo
+  ansible.builtin.command:
+    cmd: "helm repo add {{ rancher_chart_repo }} {{ rancher_chart_url }}"
+  changed_when: false
+  ignore_errors: true
+
+- name: Update helm repos
+  ansible.builtin.command:
+    cmd: helm repo update
+  changed_when: false
+
+- name: Extract version string from image tag
+  ansible.builtin.set_fact:
+    version_string: "{{ rancher_image_tag | regex_replace('-.*$', '') }}"
+
+- name: Resolve Rancher chart version
+  ansible.builtin.shell: |
+    set -euo pipefail
+    TAG="{{ rancher_image_tag }}"
+    REPO="{{ rancher_chart_repo }}"
+    VS="{{ version_string }}"
+
+    if [[ "${TAG}" == "head" ]]; then
+      helm search repo "${REPO}" --devel --versions | sed -n '1!p' | head -1 | awk '{print $2}' | tr -d '[:space:]'
+    elif [[ "{{ rancher_helm_repo }}" == "rancher-alpha" ]]; then
+      helm search repo "${REPO}" --devel --versions | grep "^${REPO}/rancher[[:space:]]" | grep "${VS}" | grep -- "-alpha" | awk '{print $2}' | sort -V | tail -1 | tr -d '[:space:]'
+    elif [[ "{{ rancher_helm_repo }}" == "rancher-latest" ]]; then
+      helm search repo "${REPO}" --devel --versions | grep "^${REPO}/rancher[[:space:]]" | grep "${VS}" | grep -- "-rc" | awk '{print $2}' | sort -V | tail -1 | tr -d '[:space:]'
+    else
+      helm search repo "${REPO}" --devel --versions | grep "${VS}" | awk '{print $2}' | sort -V | tail -1 | tr -d '[:space:]'
+    fi
+  register: helm_version_result
+  changed_when: false
+  failed_when: helm_version_result.stdout | trim == ''
+
+- name: Set rancher_version
+  ansible.builtin.set_fact:
+    rancher_version: "{{ helm_version_result.stdout | trim }}"
+
+- name: Resolve image tag for prime/latest/alpha repos
+  ansible.builtin.set_fact:
+    rancher_image_tag_resolved: >-
+      {%- if rancher_helm_repo in ['rancher-prime', 'rancher-latest', 'rancher-alpha'] -%}
+        v{{ rancher_version }}
+      {%- else -%}
+        {{ rancher_image_tag }}
+      {%- endif -%}
+
+- name: Adjust Node.js version for older Rancher
+  ansible.builtin.set_fact:
+    nodejs_version: "22.14.0"
+  when:
+    - rancher_image_tag != 'head'
+    - rancher_version is defined
+    - rancher_version.split('.')[0] | int <= 2
+    - rancher_version.split('.')[1] | int < 14
+
+- name: Report resolved versions
+  ansible.builtin.debug:
+    msg: "Rancher {{ rancher_version }}, image_tag={{ rancher_image_tag_resolved }}, chart_url={{ rancher_chart_url }}"

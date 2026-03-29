@@ -1,0 +1,30 @@
+- name: Destroy tofu workspaces
+  ansible.builtin.shell: |
+    cd {{ tofu_module }}
+    tofu workspace select {{ item.workspace }} 2>/dev/null || exit 0
+    tofu destroy -var-file="{{ outputs_dir }}/{{ item.workspace }}.tfvars" \
+      -auto-approve -no-color -input=false 2>&1 | tail -n 5
+  loop:
+    - { workspace: customnode, condition: "{{ create_initial_clusters | bool }}" }
+    - { workspace: importcluster, condition: "{{ create_initial_clusters | bool }}" }
+    - { workspace: rancher-server, condition: "{{ job_type == 'recurring' }}" }
+  when: item.condition | bool
+  loop_control:
+    label: "{{ item.workspace }}"
+  ignore_errors: true
+
+- name: Remove Docker image
+  community.docker.docker_image:
+    name: dashboard-test
+    tag: latest
+    state: absent
+  ignore_errors: true
+
+- name: Clean up executor files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ ansible_env.HOME }}/.env"
+    - "{{ dashboard_dir }}"
+  ignore_errors: true

@@ -1,0 +1,152 @@
+---
+- name: Dashboard E2E Pipeline
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars_files:
+    - vars.yaml
+
+  vars:
+    # Paths
+    qa_infra_dir: "{{ playbook_dir | dirname | dirname | dirname }}"
+    outputs_dir: "{{ ansible_env.HOME }}/.qa-infra/outputs"
+    dashboard_dir: "{{ ansible_env.HOME }}/dashboard"
+    workspace_dir: "{{ lookup('env', 'WORKSPACE') | default(playbook_dir, true) }}"
+    nodejs_dir: "{{ ansible_env.HOME }}/nodejs"
+    tofu_module: "{{ qa_infra_dir }}/tofu/aws/modules/cluster_nodes"
+    prefix: "{{ lookup('env', 'PREFIX') | default(lookup('pipe', 'head -c 4 /dev/urandom | xxd -p'), true) }}"
+
+    # Inherit from env (Jenkins sets these)
+    aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+    aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+    aws_ami: "{{ lookup('env', 'AWS_AMI') }}"
+    aws_route53_zone: "{{ lookup('env', 'AWS_ROUTE53_ZONE') }}"
+    aws_vpc: "{{ lookup('env', 'AWS_VPC') }}"
+    aws_subnet: "{{ lookup('env', 'AWS_SUBNET') }}"
+    aws_security_group: "{{ lookup('env', 'AWS_SECURITY_GROUP') }}"
+
+    # Ansible verbosity passthrough
+    ansible_verbose_flag: "{{ '-' + 'v' * (ansible_verbosity | int) if (ansible_verbosity | default(0) | int) > 0 else '' }}"
+
+  pre_tasks:
+    - name: Create outputs directory
+      ansible.builtin.file:
+        path: "{{ outputs_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Validate required AWS variables
+      ansible.builtin.assert:
+        that:
+          - aws_access_key_id | length > 0
+          - aws_secret_access_key | length > 0
+          - aws_ami | length > 0
+          - aws_route53_zone | length > 0
+          - aws_vpc | length > 0
+          - aws_subnet | length > 0
+          - aws_security_group | length > 0
+        fail_msg: "Required AWS environment variables are missing. Set them in env or vars.yaml."
+      when: job_type == 'recurring'
+
+    - name: Validate rancher_host for existing job type
+      ansible.builtin.assert:
+        that:
+          - rancher_host is defined
+          - rancher_host | length > 0
+        fail_msg: "rancher_host is required when job_type=existing. Set it in vars.yaml."
+      when: job_type == 'existing'
+
+    - name: Display pipeline info
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+           Dashboard E2E Pipeline
+           job_type={{ job_type }}, image_tag={{ rancher_image_tag }}
+           prefix={{ prefix }}
+          ============================================================
+
+    - name: Adjust Cypress tags
+      ansible.builtin.shell: |
+        TAGS="{{ cypress_tags | default('@adminUser') }}"
+        REPO="{{ rancher_helm_repo }}"
+        if [[ "${TAGS}" =~ "@bypass" ]]; then
+          TAGS="${TAGS//@bypass/}"
+          TAGS=$(echo "${TAGS}" | tr -s '+' | sed 's/^+//;s/+$//;s/+-$//')
+        else
+          if [[ "${REPO}" == "rancher-prime" || "${REPO}" == "rancher-latest" || "${REPO}" == "rancher-alpha" ]]; then
+            [[ ! "${TAGS}" =~ "@noPrime" ]] && TAGS="${TAGS}+-@noPrime" || true
+          else
+            [[ ! "${TAGS}" =~ "@prime" ]] && TAGS="${TAGS}+-@prime" || true
+          fi
+          [[ ! "${TAGS}" =~ "@noVai" ]] && TAGS="${TAGS}+-@noVai" || true
+        fi
+        echo "${TAGS}"
+      register: adjusted_tags
+      changed_when: false
+
+    - name: Set adjusted Cypress tags
+      ansible.builtin.set_fact:
+        cypress_tags: "{{ adjusted_tags.stdout | trim }}"
+
+    - name: Show adjusted Cypress tags
+      ansible.builtin.debug:
+        msg: "cypress_tags={{ cypress_tags }}"
+
+  tasks:
+    - name: Provision infrastructure
+      ansible.builtin.include_tasks: tasks/provision.yml
+      when: job_type == 'recurring' or (create_initial_clusters | bool)
+      tags: [provision]
+
+    - name: Resolve Rancher helm version
+      ansible.builtin.include_tasks: tasks/resolve-helm-version.yml
+      tags: [provision, test]
+
+    - name: Install K3s and deploy Rancher
+      ansible.builtin.include_tasks: tasks/install-k3s-rancher.yml
+      when: job_type == 'recurring' or (create_initial_clusters | bool)
+      tags: [provision]
+
+    - name: Setup test environment and build Docker image
+      ansible.builtin.include_tasks: tasks/setup-test-env.yml
+      tags: [test]
+
+    - name: Run Cypress tests
+      ansible.builtin.include_tasks:
+        file: tasks/run-tests.yml
+        apply:
+          tags: [test, test-run]
+      tags: [test, test-run]
+
+    - name: Write notification values
+      ansible.builtin.copy:
+        content: |
+          RANCHER_VERSION={{ rancher_version }}
+          RANCHER_IMAGE_TAG={{ rancher_image_tag_resolved | default(rancher_image_tag) }}
+          RANCHER_CHART_URL={{ rancher_chart_url | default('') }}
+          RANCHER_HELM_REPO={{ rancher_helm_repo }}
+          CYPRESS_TAGS={{ cypress_tags }}
+        dest: "{{ workspace_dir }}/notification_values.txt"
+      tags: [test]
+
+    - name: Cleanup infrastructure
+      ansible.builtin.include_tasks:
+        file: tasks/cleanup.yml
+        apply:
+          tags: [cleanup, never]
+      tags: [cleanup, never]
+
+  post_tasks:
+    - name: Final status
+      ansible.builtin.debug:
+        msg: >-
+          Pipeline complete.
+          Tests {{ 'PASSED' if (cypress_exit_code | default(0) | int) == 0 else 'FAILED (exit=' + (cypress_exit_code | default('?') | string) + ')' }}.
+      tags: [always]
+
+    - name: Fail if tests failed
+      ansible.builtin.fail:
+        msg: "Cypress tests failed with exit code {{ cypress_exit_code }}"
+      when: (cypress_exit_code | default(0) | int) != 0
+      tags: [always]

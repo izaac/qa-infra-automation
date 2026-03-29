@@ -1,0 +1,198 @@
+- name: Install Node.js for TypeScript scripts
+  ansible.builtin.shell: |
+    if command -v node &>/dev/null; then
+      echo "ALREADY_INSTALLED=$(node --version)"
+      exit 0
+    fi
+    NODEJS_FILE="node-v{{ nodejs_version }}-linux-x64.tar.xz"
+    curl -fsSL -o "/tmp/${NODEJS_FILE}" \
+      "https://nodejs.org/dist/v{{ nodejs_version }}/${NODEJS_FILE}"
+    mkdir -p {{ nodejs_dir }}
+    tar -xJf "/tmp/${NODEJS_FILE}" -C {{ nodejs_dir }}
+    rm -f "/tmp/${NODEJS_FILE}"
+    echo "INSTALLED=v{{ nodejs_version }}"
+  register: node_install
+  changed_when: "'INSTALLED=' in node_install.stdout"
+
+- name: Set Node.js PATH
+  ansible.builtin.set_fact:
+    node_bin: "{{ nodejs_dir }}/node-v{{ nodejs_version }}-linux-x64/bin"
+
+- name: Wait for Dashboard UI
+  ansible.builtin.uri:
+    url: "https://{{ rancher_host }}/dashboard/auth/login"
+    validate_certs: false
+    status_code: 200
+  register: dashboard_check
+  until: dashboard_check.status == 200
+  retries: 30
+  delay: 10
+
+- name: Detect dashboard target branch
+  ansible.builtin.set_fact:
+    target_branch: >-
+      {%- if rancher_image_tag == 'head' -%}
+        master
+      {%- elif rancher_image_tag is match('^v(\d+\.\d+)-head$') -%}
+        release-{{ rancher_image_tag | regex_replace('^v(\d+\.\d+)-head$', '\1') }}
+      {%- else -%}
+        {{ dashboard_branch | default('master') }}
+      {%- endif -%}
+
+- name: Remove old dashboard checkout
+  ansible.builtin.file:
+    path: "{{ dashboard_dir }}"
+    state: absent
+
+- name: Clone dashboard repo
+  ansible.builtin.git:
+    repo: "https://github.com/{{ dashboard_repo | regex_replace('\\.git$', '') }}.git"
+    dest: "{{ dashboard_dir }}"
+    version: "{{ target_branch }}"
+    depth: 1
+
+- name: Overlay CI files from dashboard_branch onto release branches
+  ansible.builtin.shell: |
+    set -e
+    cd {{ dashboard_dir }}
+    git fetch --depth=1 origin {{ dashboard_branch | default('master') }}
+    git checkout FETCH_HEAD -- cypress/jenkins cypress/support package.json yarn.lock cypress.config.ts
+  when: target_branch != (dashboard_branch | default('master'))
+  changed_when: true
+
+- name: Run rancher-setup.ts (configure users, detect branch)
+  ansible.builtin.command:
+    cmd: >-
+      {{ node_bin }}/node --experimental-strip-types
+      cypress/jenkins/rancher-setup.ts
+      --host {{ rancher_host }}
+      --password {{ rancher_password }}
+      --rancher-password {{ rancher_password }}
+    chdir: "{{ dashboard_dir }}"
+  environment:
+    NODE_TLS_REJECT_UNAUTHORIZED: "0"
+    PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+  register: rancher_setup_output
+  when: job_type == 'recurring'
+
+- name: Parse branch from rancher-setup.ts
+  ansible.builtin.set_fact:
+    branch_from_rancher: "{{ rancher_setup_output.stdout | regex_search('BRANCH_FROM_RANCHER=(.*)', '\\1') | first }}"
+  when: job_type == 'recurring' and rancher_setup_output.stdout is defined
+
+- name: Handle imported kubeconfig from provision
+  when: create_initial_clusters | bool
+  block:
+    - name: Encode import kubeconfig to base64
+      ansible.builtin.slurp:
+        src: "{{ outputs_dir }}/kubeconfig-import.yaml"
+      register: import_kubeconfig_b64
+
+    - name: Set kubeconfig variables
+      ansible.builtin.set_fact:
+        imported_kubeconfig: "{{ import_kubeconfig_b64.content }}"
+
+    - name: Write imported_config for Docker
+      ansible.builtin.copy:
+        content: "{{ import_kubeconfig_b64.content | b64decode }}"
+        dest: "{{ dashboard_dir }}/imported_config"
+        mode: "0600"
+
+- name: Remove kubeconfig lines when no import cluster
+  when: not (create_initial_clusters | bool)
+  block:
+    - name: Strip kubectl from cypress.sh
+      ansible.builtin.lineinfile:
+        path: "{{ dashboard_dir }}/cypress/jenkins/cypress.sh"
+        regexp: "kubectl"
+        state: absent
+
+    - name: Strip imported_config from Dockerfile.ci
+      ansible.builtin.lineinfile:
+        path: "{{ dashboard_dir }}/cypress/jenkins/Dockerfile.ci"
+        regexp: "imported_config"
+        state: absent
+
+- name: Set custom node key from provision SSH key
+  when: create_initial_clusters | bool
+  block:
+    - name: Read SSH private key
+      ansible.builtin.slurp:
+        src: "{{ ssh_key }}"
+      register: ssh_key_content
+
+    - name: Set custom_node_key fact
+      ansible.builtin.set_fact:
+        custom_node_key: "{{ ssh_key_content.content }}"
+
+- name: Install Yarn globally
+  ansible.builtin.command:
+    cmd: "{{ node_bin }}/npm install -g yarn@{{ yarn_version }} --silent"
+  environment:
+    PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+  changed_when: false
+
+- name: Configure yarn ignore-engines
+  ansible.builtin.command:
+    cmd: yarn config set ignore-engines true --silent
+    chdir: "{{ dashboard_dir }}"
+  environment:
+    PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+  changed_when: false
+
+- name: Clean yarn cache
+  ansible.builtin.command:
+    cmd: yarn cache clean
+    chdir: "{{ dashboard_dir }}"
+  environment:
+    PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+  changed_when: false
+
+- name: Yarn install (frozen lockfile)
+  ansible.builtin.command:
+    cmd: yarn install --frozen-lockfile
+    chdir: "{{ dashboard_dir }}"
+  environment:
+    PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+
+- name: Verify cypress-multi-reporters
+  ansible.builtin.stat:
+    path: "{{ dashboard_dir }}/node_modules/cypress-multi-reporters"
+  register: reporter_check
+  failed_when: not reporter_check.stat.exists
+
+- name: Substitute CYPRESSTAGS placeholder in cypress.sh
+  ansible.builtin.replace:
+    path: "{{ dashboard_dir }}/cypress/jenkins/cypress.sh"
+    regexp: "CYPRESSTAGS"
+    replace: "{{ cypress_tags }}"
+
+- name: Build dashboard-test Docker image
+  community.docker.docker_image:
+    name: dashboard-test
+    tag: latest
+    source: build
+    build:
+      path: "{{ ansible_env.HOME }}"
+      dockerfile: "{{ dashboard_dir }}/cypress/jenkins/Dockerfile.ci"
+      args:
+        YARN_VERSION: "{{ yarn_version }}"
+        NODE_VERSION: "{{ nodejs_version }}"
+        CYPRESS_VERSION: "{{ cypress_version }}"
+        CHROME_VERSION: "{{ chrome_version }}"
+        KUBECTL_VERSION: "{{ kubectl_version }}"
+      pull: false
+    force_source: true
+
+- name: Fix dashboard permissions after Docker build
+  ansible.builtin.file:
+    path: "{{ dashboard_dir }}"
+    owner: "{{ ansible_env.USER }}"
+    recurse: true
+  become: true
+
+- name: Generate .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ ansible_env.HOME }}/.env"
+    mode: "0600"
