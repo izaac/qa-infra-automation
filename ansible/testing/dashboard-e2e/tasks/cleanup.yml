@@ -1,0 +1,38 @@
+# Tear down all provisioned infrastructure.
+# Loops through tofu workspaces and destroys each one.
+# Uses --tags cleanup,never to prevent accidental execution.
+
+- name: Destroy tofu workspaces
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      cd {{ tofu_module }}
+      tofu workspace select {{ item.workspace }} 2>/dev/null || exit 0
+      tofu destroy -var-file="{{ outputs_dir }}/{{ item.workspace }}.tfvars" \
+        -auto-approve -no-color -input=false 2>&1 | tail -n 5
+    executable: /bin/bash
+  loop:
+    - { workspace: customnode, condition: "{{ create_initial_clusters | bool }}" }
+    - { workspace: importcluster, condition: "{{ create_initial_clusters | bool }}" }
+    - { workspace: rancher-server, condition: "{{ job_type == 'recurring' }}" }
+  when: item.condition | bool
+  loop_control:
+    label: "{{ item.workspace }}"
+  changed_when: true
+  failed_when: false
+
+- name: Remove Docker image
+  community.docker.docker_image:
+    name: dashboard-test
+    tag: latest
+    state: absent
+  failed_when: false
+
+- name: Clean up executor files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ ansible_env.HOME }}/.env"
+    - "{{ dashboard_dir }}"
+  failed_when: false

@@ -1,0 +1,2 @@
+skip_list:
+  - role-name  # This is a playbook directory, not a role
