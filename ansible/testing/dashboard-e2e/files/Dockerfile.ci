@@ -1,0 +1,14 @@
+FROM cypress/factory:7.3.1@sha256:beb1107f12f2b9a0950d15ee5188f4fe9f049c620960ce3440accacbbc659afa
+
+ARG KUBECTL_VERSION=v1.29.8
+RUN wget -q "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -O /tmp/kubectl && \
+    wget -q "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" -O /tmp/kubectl.sha256 && \
+    echo "$(cat /tmp/kubectl.sha256)  /tmp/kubectl" | sha256sum -c - && \
+    mv /tmp/kubectl /bin/kubectl && \
+    chmod +x /bin/kubectl && \
+    rm -f /tmp/kubectl.sha256
+RUN mkdir -p /root/.kube
+
+COPY dashboard/imported_config /root/.kube/config
+
+ENTRYPOINT ["bash", "dashboard/cypress/jenkins/cypress.sh"]

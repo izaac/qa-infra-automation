@@ -1,8 +1,20 @@
 ---
 # Main orchestrator — see README.md for usage and configuration.
 #
-# Flow: validate → provision → resolve helm → install k3s/rancher →
-#       setup test env → run cypress → cleanup
+# Stages (controlled via --tags / --skip-tags):
+#   provision  →  EC2 + DNS + K3s + Rancher
+#   setup      →  clone dashboard, copy CI files, build Docker image
+#   test       →  run Cypress inside Docker container (no streaming)
+#   cleanup    →  destroy tofu workspaces (requires --tags cleanup)
+#
+# Jenkins uses --skip-tags test and runs Docker directly via init.sh
+# for real-time streaming and color output.
+#
+# Examples:
+#   Full pipeline:   ansible-playbook playbook.yml --tags provision,setup,test
+#   Infra only:      ansible-playbook playbook.yml --tags provision
+#   Re-run tests:    ansible-playbook playbook.yml --tags setup,test
+#   Destroy:         ansible-playbook playbook.yml --tags cleanup
 - name: Dashboard E2E Pipeline
   hosts: localhost
   connection: local
@@ -38,6 +50,7 @@
         path: "{{ outputs_dir }}"
         state: directory
         mode: "0755"
+      tags: [always]
 
     - name: Validate required AWS variables
       ansible.builtin.assert:
@@ -51,6 +64,7 @@
           - aws_security_group | length > 0
         fail_msg: "Required AWS environment variables are missing. Set them in env or vars.yaml."
       when: job_type == 'recurring'
+      tags: [always]
 
     - name: Validate rancher_host for existing job type
       ansible.builtin.assert:
@@ -59,10 +73,12 @@
           - rancher_host | length > 0
         fail_msg: "rancher_host is required when job_type=existing. Set it in vars.yaml."
       when: job_type == 'existing'
+      tags: [always]
 
     - name: Display pipeline info
       ansible.builtin.debug:
         msg: "Dashboard E2E Pipeline — job_type={{ job_type }}, image_tag={{ rancher_image_tag }}, prefix={{ prefix }}"
+      tags: [always]
 
     - name: Adjust Cypress tags
       ansible.builtin.shell:
@@ -85,14 +101,17 @@
         executable: /bin/bash
       register: adjusted_tags
       changed_when: false
+      tags: [always]
 
     - name: Set adjusted Cypress tags
       ansible.builtin.set_fact:
         cypress_tags: "{{ adjusted_tags.stdout | trim }}"
+      tags: [always]
 
     - name: Show adjusted Cypress tags
       ansible.builtin.debug:
         msg: "cypress_tags={{ cypress_tags }}"
+      tags: [always]
 
   tasks:
     - name: Provision infrastructure
@@ -102,7 +121,7 @@
 
     - name: Resolve Rancher helm version
       ansible.builtin.include_tasks: tasks/resolve-helm-version.yml
-      tags: [provision, test]
+      tags: [provision, setup]
 
     - name: Install K3s and deploy Rancher
       ansible.builtin.include_tasks: tasks/install-k3s-rancher.yml
@@ -111,14 +130,14 @@
 
     - name: Setup test environment and build Docker image
       ansible.builtin.include_tasks: tasks/setup-test-env.yml
-      tags: [test]
+      tags: [setup]
 
     - name: Run Cypress tests
       ansible.builtin.include_tasks:
         file: tasks/run-tests.yml
         apply:
-          tags: [test, test-run]
-      tags: [test, test-run]
+          tags: [test]
+      tags: [test]
 
     - name: Write notification values
       ansible.builtin.copy:
@@ -130,7 +149,7 @@
           CYPRESS_TAGS={{ cypress_tags }}
         dest: "{{ workspace_dir }}/notification_values.txt"
         mode: "0644"
-      tags: [test]
+      tags: [setup, test]
 
     - name: Cleanup infrastructure
       ansible.builtin.include_tasks:
@@ -148,7 +167,7 @@
           {%- elif cypress_exit_code is defined -%}
             Pipeline complete. Tests {{ 'PASSED' if (cypress_exit_code | int) == 0 else 'FAILED (exit=' + (cypress_exit_code | string) + ')' }}.
           {%- else -%}
-            Setup complete. Tests will run outside the playbook (docker streaming).
+            Setup complete. Run tests with --tags test or via init.sh (streaming).
           {%- endif -%}
       tags: [always]
 

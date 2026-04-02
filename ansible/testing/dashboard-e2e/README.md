@@ -31,7 +31,8 @@ The following must be available on the machine running the playbook:
 Required Ansible collections (installed automatically by `init.sh` in Jenkins):
 
 ```bash
-ansible-galaxy collection install cloud.terraform kubernetes.core community.docker community.crypto
+ansible-galaxy collection install \
+  cloud.terraform kubernetes.core "community.docker:<5" "community.crypto:<3" --upgrade
 ```
 
 ## Quick Start
@@ -59,27 +60,42 @@ ansible-playbook dashboard-e2e-playbook.yml
 
 ## Usage Examples
 
-### Full pipeline (provision, deploy, test, cleanup)
+### Full pipeline (provision, deploy, test)
 
-Run everything in a single command. Ideal for local development or standalone CI.
+Run everything in a single command. Ideal for standalone CI or local full-stack testing.
 
 ```bash
-ansible-playbook dashboard-e2e-playbook.yml
+ansible-playbook dashboard-e2e-playbook.yml --tags provision,setup,test
 ```
 
-### Setup only (provision + deploy, skip Cypress run)
+### Provision only (infrastructure + deploy)
 
-Provision infrastructure, install K3s, deploy Rancher, build Docker image, and
-generate `.env` but skip the actual Cypress docker run. Useful when you want to
-run tests manually or stream output in real time (e.g. Jenkins).
+Provision AWS, deploy K3s and Rancher, but don't run tests. Useful for
+setting up a long-lived environment.
 
 ```bash
-ansible-playbook dashboard-e2e-playbook.yml --skip-tags test-run
+ansible-playbook dashboard-e2e-playbook.yml --tags provision
 ```
 
-Then run Cypress directly for real-time streaming:
+### Setup + test (against provisioned infra)
+
+Clone dashboard, build Docker image, run Cypress. Use after provisioning
+or against an existing Rancher (`job_type=existing`).
 
 ```bash
+ansible-playbook dashboard-e2e-playbook.yml --tags setup,test
+```
+
+### Real-time Docker streaming
+
+The playbook's `test` stage buffers Docker output. For real-time streaming
+with colors (e.g. local dev or Jenkins), run setup only, then Docker manually:
+
+```bash
+# Setup: clone dashboard, build image, generate .env
+ansible-playbook dashboard-e2e-playbook.yml --tags setup
+
+# Run Cypress with real-time streaming
 docker run --rm -t \
   --shm-size=2g \
   --env-file ~/.env \
@@ -97,7 +113,7 @@ You must set `rancher_host` to your Rancher URL and `job_type` to `existing`.
 ```bash
 ansible-playbook dashboard-e2e-playbook.yml \
   --extra-vars "job_type=existing rancher_host=rancher.example.com" \
-  --tags test
+  --tags setup,test
 ```
 
 ### Cleanup only (destroy infrastructure)
@@ -110,7 +126,7 @@ special `never` tag to prevent accidental execution during normal runs.
 ansible-playbook dashboard-e2e-playbook.yml --tags cleanup,never
 ```
 
-### jenkins integration
+### Jenkins integration
 
 The [`cypress/jenkins/init.sh`](https://github.com/rancher/dashboard/blob/master/cypress/jenkins/init.sh)
 script in the [rancher/dashboard](https://github.com/rancher/dashboard) repository
@@ -125,8 +141,8 @@ cypress/jenkins/init.sh
 cypress/jenkins/init.sh destroy
 ```
 
-Jenkins uses `--skip-tags test-run` so that Cypress output streams directly to
-the Jenkins console with color support, then runs the Docker container itself.
+Jenkins uses `--skip-tags test` so that Cypress output streams directly to
+the Jenkins console with color support via init.sh's Docker run.
 
 ## Configuration
 
@@ -226,7 +242,7 @@ rancher_image_tag: "head"
 | `create_initial_clusters` | `true` | Whether to create import cluster and custom node. In `existing` mode, provisions only these resources (not the Rancher server) |
 | `dashboard_repo` | `rancher/dashboard` | Dashboard GitHub repo to clone |
 | `dashboard_branch` | (auto-detected) | Branch to clone. Auto-detected from `rancher_image_tag` (e.g. `v2.14-head` → `release-2.14`) |
-| `dashboard_overlay_branch` | `master` | Branch to overlay CI files from (cypress/jenkins/*, package.json, etc.) |
+| `dashboard_overlay_branch` | `master` | Branch to overlay dependency files from (package.json, yarn.lock, cypress.config.ts). CI files come from the playbook's `files/` directory |
 
 ### Pinned versions
 
@@ -262,10 +278,13 @@ Example: Input `@userMenu` with repo `rancher-com-rc` becomes
 
 | Tag | What it runs |
 |-----|-------------|
-| `provision` | Infrastructure provisioning + K3s + Rancher deploy |
-| `test` | Test environment setup + Cypress execution |
-| `test-run` | Cypress Docker run only (subset of `test`) |
+| `provision` | Infrastructure provisioning (OpenTofu) + K3s + Rancher deploy + Helm resolution |
+| `setup` | Clone dashboard, copy CI files, build Docker image, generate .env |
+| `test` | Cypress Docker run + result collection |
 | `cleanup` | Infrastructure teardown (requires `--tags cleanup,never`) |
+
+Pre-tasks (validation, tag adjustment) use `always` — they run regardless of
+which tags you specify.
 
 ## Outputs
 
@@ -282,28 +301,37 @@ After a successful run, the following artifacts are available:
 
 ```text
 dashboard-e2e-playbook.yml          Main orchestrator
-  pre_tasks:
+  pre_tasks: [always]
     validate AWS vars
     adjust Cypress tags               Appends -@prime/-@noVai exclusions
   tasks:
-    tasks/provision.yml               OpenTofu apply (3 workspaces in parallel via async)
-    tasks/resolve-helm-version.yml    Resolves Rancher Helm chart version from image tag
-    tasks/install-k3s-rancher.yml     Delegates to k3s + rancher-ha playbooks (parallel)
-    tasks/setup-test-env.yml          Clone repo, overlay CI files, configure users, Docker build
-    tasks/run-tests.yml               Docker run, collect JUnit + HTML reports
-    tasks/cleanup.yml                 OpenTofu destroy (loop), remove artifacts
+    tasks/provision.yml       [provision]  OpenTofu apply (3 workspaces in parallel via async)
+    tasks/resolve-helm-version.yml  [provision, setup]  Resolve Rancher Helm chart version
+    tasks/install-k3s-rancher.yml   [provision]  K3s + rancher-ha playbooks (parallel)
+    tasks/setup-test-env.yml  [setup]    Clone repo, copy CI files from files/, Docker build
+    tasks/run-tests.yml       [test]     Docker run, collect JUnit + HTML reports
+    tasks/cleanup.yml         [cleanup]  OpenTofu destroy (loop), remove artifacts
+
+files/                               CI files (copied into dashboard clone at setup)
+  Dockerfile.ci                      Cypress factory image + kubectl
+  cypress.sh                         Container entrypoint — runs Cypress + jrm
+  cypress.config.jenkins.ts          Cypress config (reporters, retries, Qase)
+  grep-filter.ts                     Pre-filter specs by tag
+  utils.sh                           Shared shell utilities (clean_tags, etc.)
 ```
 
 ### Key Scripts and Tasks
 
-- **`tasks/configure-rancher-users.yml`** -- Creates `standard_user`
+- **`files/`** — CI files that are infrastructure concern, not test code.
+  The playbook copies them into the dashboard clone during setup, making the
+  playbook fully self-contained. No git overlay needed for CI files.
+- **`tasks/configure-rancher-users.yml`** — Creates `standard_user`
   with global and project role bindings via the Rancher API. Idempotent
   (skips if resources already exist). Fatal on `recurring` jobs if
   verification fails; warns and continues on `existing` jobs.
-- **[`grep-filter.ts`](https://github.com/rancher/dashboard/blob/master/cypress/jenkins/grep-filter.ts)**
-  (from [rancher/dashboard](https://github.com/rancher/dashboard))
-  -- Pre-filters Cypress spec files by tag before Cypress
-  launches. Runs inside the Docker container to reduce unnecessary spec loading.
+- **`files/grep-filter.ts`** — Pre-filters Cypress spec files by tag before
+  Cypress launches. Runs inside the Docker container to reduce unnecessary
+  spec loading.
 
 ## Troubleshooting
 
@@ -336,9 +364,9 @@ This is safe to ignore. The cleanup uses `|| exit 0` so missing workspaces
 
 ## Dependencies
 
-Ansible collections required (see `requirements.yml` or install manually):
+Ansible collections required (install manually or let `init.sh` handle it in Jenkins):
 
-- `cloud.terraform` -- OpenTofu/Terraform state lookups and provider management
-- `kubernetes.core` -- Kubernetes resource operations
-- `community.docker` -- Docker image build and container management
-- `community.crypto` -- SSH keypair generation
+- `cloud.terraform` — OpenTofu/Terraform state lookups and provider management
+- `kubernetes.core` — Kubernetes resource operations
+- `community.docker` **< 5** — Docker image build and container management (v5+ requires ansible-core ≥ 2.17)
+- `community.crypto` **< 3** — SSH keypair generation (v3+ requires ansible-core ≥ 2.17)

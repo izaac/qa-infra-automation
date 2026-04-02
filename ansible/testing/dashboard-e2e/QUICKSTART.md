@@ -30,7 +30,7 @@ Install the required Ansible collections:
 
 ```bash
 ansible-galaxy collection install \
-  cloud.terraform kubernetes.core community.docker community.crypto
+  cloud.terraform kubernetes.core "community.docker:<5" "community.crypto:<3" --upgrade
 ```
 
 ## Step 2: Clone the repo
@@ -74,17 +74,38 @@ for this use case.
 ## Step 4: Run the tests
 
 ```bash
-ansible-playbook dashboard-e2e-playbook.yml --tags test
+# Setup test environment + run tests
+ansible-playbook dashboard-e2e-playbook.yml --tags setup,test
 ```
 
 This will:
 
-1. Wait for your Rancher UI to be reachable
-2. Create `standard_user` with role bindings (idempotent)
-3. Clone the dashboard repo and overlay CI files
-4. Build the Cypress Docker image
-5. Generate the `.env` file with your Rancher credentials
-6. Run Cypress tests inside Docker
+1. Validate configuration and adjust Cypress tags
+2. Wait for your Rancher UI to be reachable
+3. Clone the dashboard repo and copy CI files from the playbook
+4. Create `standard_user` with role bindings (idempotent)
+5. Build the Cypress Docker image
+6. Generate the `.env` file with your Rancher credentials
+7. Run Cypress tests inside Docker
+
+### Running stages separately
+
+```bash
+# Setup only (build image, skip test run)
+ansible-playbook dashboard-e2e-playbook.yml --tags setup
+
+# Run tests only (after setup is done)
+ansible-playbook dashboard-e2e-playbook.yml --tags test
+
+# Or run Docker manually for real-time streaming with colors
+docker run --rm -t \
+  --shm-size=2g \
+  --env-file ~/.env \
+  -e NODE_PATH="" \
+  -v "$HOME:/e2e" \
+  -w /e2e \
+  dashboard-test:latest
+```
 
 ## Step 5: Check results
 

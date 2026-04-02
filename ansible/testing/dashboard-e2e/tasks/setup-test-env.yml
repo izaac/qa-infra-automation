@@ -1,5 +1,6 @@
-# Prepare the test environment: clone dashboard, overlay CI files from master
-# onto release branches, create Rancher users, encode SSH keys for Cypress,
+# Prepare the test environment: clone dashboard, copy CI files from the
+# playbook's files/ directory, overlay dependency files from master onto
+# release branches, create Rancher users, encode SSH keys for Cypress,
 # build the Docker image, and generate the .env file.
 
 - name: Wait for Dashboard UI
@@ -43,7 +44,21 @@
     version: "{{ target_branch }}"
     depth: 1
 
-- name: Overlay CI files onto release branches
+- name: Copy CI files from playbook into dashboard checkout
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ dashboard_dir }}/{{ item.dest }}"
+    mode: "{{ item.mode | default('0644') }}"
+  loop:
+    - { src: "{{ playbook_dir }}/files/Dockerfile.ci", dest: "cypress/jenkins/Dockerfile.ci" }
+    - { src: "{{ playbook_dir }}/files/cypress.sh", dest: "cypress/jenkins/cypress.sh", mode: "0755" }
+    - { src: "{{ playbook_dir }}/files/utils.sh", dest: "cypress/jenkins/utils.sh", mode: "0755" }
+    - { src: "{{ playbook_dir }}/files/grep-filter.ts", dest: "cypress/jenkins/grep-filter.ts" }
+    - { src: "{{ playbook_dir }}/files/cypress.config.jenkins.ts", dest: "cypress/jenkins/cypress.config.jenkins.ts" }
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Overlay dependency files from dashboard master onto release branches
   ansible.builtin.shell: |
     set -e
     cd {{ dashboard_dir }}
@@ -53,15 +68,15 @@
       echo "[overlay] ERROR: git fetch origin ${OVERLAY_BRANCH} failed"
       exit 1
     }
-    # Required files — fail if any are missing from the overlay branch
-    git checkout FETCH_HEAD -- cypress/jenkins cypress/package.json cypress/yarn.lock package.json yarn.lock cypress.config.ts || {
-      echo "[overlay] ERROR: required CI files missing on ${OVERLAY_BRANCH}"
+    # Required dependency files — fail if missing
+    git checkout FETCH_HEAD -- cypress/package.json cypress/yarn.lock package.json yarn.lock cypress.config.ts || {
+      echo "[overlay] ERROR: required dependency files missing on ${OVERLAY_BRANCH}"
       exit 1
     }
     # Optional files — may not exist on all branches
     git checkout FETCH_HEAD -- cypress/support/qase.ts 2>/dev/null || \
       echo "[overlay] NOTICE: cypress/support/qase.ts not found on ${OVERLAY_BRANCH}, skipping"
-    echo "[overlay] OK — overlaid CI files from ${OVERLAY_BRANCH} onto {{ target_branch }}"
+    echo "[overlay] OK — overlaid dependency files from ${OVERLAY_BRANCH} onto {{ target_branch }}"
   when: target_branch != (dashboard_overlay_branch | default(dashboard_branch, true) | default('master', true))
   changed_when: true
 
