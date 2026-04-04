@@ -81,7 +81,20 @@
   changed_when: true
 
 - name: Configure Rancher users and role bindings
-  ansible.builtin.include_tasks: configure-rancher-users.yml
+  ansible.builtin.include_role:
+    name: rancher_user_setup
+  vars:
+    rancher_admin_password: "{{ rancher_password }}"
+    rancher_user_on_error: "{{ 'fail' if job_type == 'recurring' else 'warn' }}"
+    rancher_users:
+      - username: standard_user
+        password: "{{ rancher_password }}"
+        global_roles:
+          - user
+        project_roles:
+          - role: project-member
+            project: Default
+            cluster: local
 
 - name: Handle imported kubeconfig from provision
   when: create_initial_clusters | bool

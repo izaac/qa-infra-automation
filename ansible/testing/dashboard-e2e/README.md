@@ -373,7 +373,7 @@ dashboard-e2e-playbook.yml          Main orchestrator
     tasks/provision.yml       [provision]  OpenTofu apply (3 workspaces in parallel via async)
     tasks/resolve-helm-version.yml  [provision, setup]  Resolve Rancher Helm chart version
     tasks/install-k3s-rancher.yml   [provision]  K3s + rancher-ha playbooks (parallel)
-    tasks/setup-test-env.yml  [setup]    Clone repo, copy CI files from files/, Docker build
+    tasks/setup-test-env.yml  [setup]    Clone repo, CI files, user setup (role), Docker build
     tasks/run-tests.yml       [test]     Docker run, collect JUnit + HTML reports
     tasks/cleanup.yml         [cleanup]  OpenTofu destroy (loop), remove artifacts
 
@@ -390,10 +390,10 @@ files/                               CI files (copied into dashboard clone at se
 - **`files/`** — CI files that are infrastructure concern, not test code.
   The playbook copies them into the dashboard clone during setup, making the
   playbook fully self-contained. No git overlay needed for CI files.
-- **`tasks/configure-rancher-users.yml`** — Creates `standard_user`
-  with global and project role bindings via the Rancher API. Idempotent
-  (skips if resources already exist). Fatal on `recurring` jobs if
-  verification fails; warns and continues on `existing` jobs.
+- **`rancher_user_setup` role** (`ansible/roles/rancher_user_setup/`) — Creates
+  Rancher local users with global and project role bindings via the Rancher API.
+  Parameterized: accepts a list of users, roles, and project bindings. Idempotent
+  (skips if resources already exist). Error handling configurable (`fail` or `warn`).
 - **`files/grep-filter.ts`** — Pre-filters Cypress spec files by tag before
   Cypress launches. Runs inside the Docker container to reduce unnecessary
   spec loading.
@@ -414,7 +414,7 @@ K3s version.
 
 The playbook changes the admin password from `bootstrap_password` to
 `rancher_password` during deploy. Make sure `rancher_password` in vars.yaml
-matches what you expect. The `configure-rancher-users.yml` task uses `rancher_password`.
+matches what you expect. The `rancher_user_setup` role uses `rancher_password`.
 
 ### Cypress tests fail with "baseUrl not reachable"
 
