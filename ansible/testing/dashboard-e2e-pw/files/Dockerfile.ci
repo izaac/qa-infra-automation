@@ -1,0 +1,14 @@
+FROM mcr.microsoft.com/playwright:v1.52.0-noble
+
+# renovate: datasource=github-release-attachments depName=kubernetes/kubernetes
+ENV KUBECTL_VERSION=v1.33.10
+# renovate: datasource=github-release-attachments depName=kubernetes/kubernetes digestVersion=v1.33.10
+ENV KUBECTL_SUM=f156acb753ee4366789ab7a663916eb580e7ee1b9e449bc9b052181db524e3f5
+
+RUN wget -q "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -O /tmp/kubectl && \
+    echo "${KUBECTL_SUM}  /tmp/kubectl" | sha256sum -c - && \
+    mv /tmp/kubectl /bin/kubectl && \
+    chmod +x /bin/kubectl
+RUN mkdir -p /root/.kube
+
+ENTRYPOINT ["bash", "playwright.sh"]

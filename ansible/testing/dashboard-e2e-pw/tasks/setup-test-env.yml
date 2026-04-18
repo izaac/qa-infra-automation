@@ -1,0 +1,120 @@
+# Prepare the Playwright test environment: clone dashboard-e2e-pw repo,
+# configure Rancher users, handle kubeconfig, build Docker image, generate .env.
+
+- name: Wait for Dashboard UI
+  ansible.builtin.uri:
+    url: "https://{{ rancher_host }}/dashboard/auth/login"
+    validate_certs: false
+    status_code: 200
+  register: dashboard_check
+  until: dashboard_check.status == 200
+  retries: 30
+  delay: 10
+
+- name: Remove old test repo checkout
+  ansible.builtin.file:
+    path: "{{ dashboard_dir }}"
+    state: absent
+
+- name: Clone Playwright E2E repo
+  ansible.builtin.git:
+    repo: "https://github.com/{{ dashboard_repo | regex_replace('\\.git$', '') }}.git"
+    dest: "{{ dashboard_dir }}"
+    version: "{{ dashboard_branch }}"
+    depth: 1
+  retries: 3
+  delay: 10
+  register: _git_clone
+  until: _git_clone is success
+
+- name: Copy CI files into checkout
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ dashboard_dir }}/{{ item.dest }}"
+    mode: "{{ item.mode | default('0644') }}"
+  loop:
+    - { src: "{{ playbook_dir }}/files/Dockerfile.ci", dest: "Dockerfile.ci" }
+    - { src: "{{ playbook_dir }}/files/playwright.sh", dest: "playwright.sh", mode: "0755" }
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Configure Rancher users and role bindings
+  ansible.builtin.include_role:
+    name: rancher_user_setup
+  vars:
+    rancher_admin_password: "{{ rancher_password }}"
+    rancher_user_on_error: "{{ 'fail' if '@standardUser' in playwright_tags else 'warn' }}"
+    rancher_users:
+      - username: standard_user
+        password: "{{ rancher_password }}"
+        global_roles:
+          - user
+        project_roles:
+          - role: project-member
+            project: Default
+            cluster: local
+
+- name: Handle imported kubeconfig from provision
+  when: create_initial_clusters | bool
+  block:
+    - name: Check kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ outputs_dir }}/kubeconfig-import.yaml"
+      register: _kubeconfig_file
+
+    - name: Encode import kubeconfig to base64
+      ansible.builtin.slurp:
+        src: "{{ outputs_dir }}/kubeconfig-import.yaml"
+      register: import_kubeconfig_b64
+      when: _kubeconfig_file.stat.exists
+
+    - name: Write imported_config for Docker
+      ansible.builtin.copy:
+        content: "{{ import_kubeconfig_b64.content | b64decode }}"
+        dest: "{{ dashboard_dir }}/imported_config"
+        mode: "0600"
+      when: _kubeconfig_file.stat.exists
+
+    - name: Warn if kubeconfig missing
+      ansible.builtin.debug:
+        msg: >-
+          kubeconfig-import.yaml not found — import cluster tests will be
+          skipped. Run with --tags provision to create import clusters.
+      when: not _kubeconfig_file.stat.exists
+
+- name: Strip imported_config from Dockerfile when no import cluster
+  ansible.builtin.lineinfile:
+    path: "{{ dashboard_dir }}/Dockerfile.ci"
+    regexp: "imported_config"
+    state: absent
+  when: not (create_initial_clusters | bool) or (_kubeconfig_file is defined and not _kubeconfig_file.stat.exists)
+
+- name: Set custom node key from SSH key file
+  when:
+    - create_initial_clusters | bool
+    - custom_node_key is not defined
+    - ssh_key is defined
+  block:
+    - name: Read and base64-encode SSH private key
+      ansible.builtin.slurp:
+        src: "{{ ssh_key }}"
+      register: ssh_key_content
+
+    - name: Set custom_node_key fact
+      ansible.builtin.set_fact:
+        custom_node_key: "{{ ssh_key_content.content }}"
+
+- name: Build Playwright test Docker image
+  ansible.builtin.shell: |
+    set -e
+    docker build \
+      -t playwright-test:{{ executor_tag }} \
+      -f "{{ dashboard_dir }}/Dockerfile.ci" \
+      "{{ dashboard_dir }}"
+  changed_when: true
+
+- name: Generate .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ workspace_dir }}/.env"
+    mode: "0600"

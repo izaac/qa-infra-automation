@@ -1,0 +1,45 @@
+# Playwright E2E Test Pipeline Configuration
+# Copy this file to vars.yaml and edit values below.
+
+# --- AWS infrastructure ---
+aws_region: "us-west-1"
+aws_ssh_user: "ubuntu"
+aws_instance_type: "t3a.xlarge"
+aws_volume_size: 60
+aws_volume_type: "gp3"
+aws_ami: ""           # Ubuntu AMI for your region
+aws_security_group: "" # SG allowing SSH + HTTPS
+aws_subnet: ""         # Subnet in your VPC
+aws_vpc: ""            # VPC ID
+aws_route53_zone: ""   # Route53 hosted zone
+
+# --- K3s ---
+k3s_kubernetes_version: "v1.35.3+k3s1"
+server_count: 3
+
+# --- Rancher ---
+rancher_helm_repo: "rancher-com-rc"
+rancher_image_tag: "head"
+cert_manager_version: "1.11.0"
+bootstrap_password: "password"
+rancher_password: "password1234"
+rancher_username: "admin"
+# rancher_host: ""  # Set for job_type=existing
+
+# --- Dashboard E2E repo ---
+dashboard_repo: "izaac/dashboard-e2e-pw"
+dashboard_branch: "main"
+
+# --- Playwright ---
+playwright_tags: "@provisioning+@adminUser"
+playwright_version: "1.52.0"
+
+# --- Job type ---
+# "recurring" = provision new infra, "existing" = use rancher_host
+job_type: "existing"
+create_initial_clusters: false
+
+# --- Reporting ---
+qase_enabled: false
+qase_project: "RM"
+qase_debug: false
