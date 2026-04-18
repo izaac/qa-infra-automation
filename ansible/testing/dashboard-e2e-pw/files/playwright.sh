@@ -20,6 +20,9 @@ echo "[playwright.sh] kubectl $(kubectl version --client -o json 2>/dev/null | g
 
 export FORCE_COLOR=1
 export NODE_OPTIONS="--max-old-space-size=4096"
+# Use container's pre-installed browsers, not host paths leaked via volume mount
+export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+unset PLAYWRIGHT_CHROMIUM_PATH
 
 # Tags from .env (GREP_TAGS)
 TAGS="${GREP_TAGS:-}"
