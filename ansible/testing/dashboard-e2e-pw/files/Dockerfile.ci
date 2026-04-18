@@ -1,5 +1,23 @@
-FROM mcr.microsoft.com/playwright:v1.52.0-noble
+# Factory-style image: Node + Yarn + Chromium only (no Firefox/WebKit bloat)
+ARG NODE_VERSION=22
+FROM node:${NODE_VERSION}-slim
 
+ARG PLAYWRIGHT_VERSION=1.52.0
+ARG YARN_VERSION=1.22.22
+
+# Minimal system deps (wget for kubectl)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Yarn (skip if already bundled in base image)
+RUN command -v yarn >/dev/null 2>&1 || npm install -g yarn@${YARN_VERSION}
+
+# Playwright — install Chrome + all its OS deps (--with-deps handles everything)
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN npx playwright@${PLAYWRIGHT_VERSION} install --with-deps chrome
+
+# kubectl
 # renovate: datasource=github-release-attachments depName=kubernetes/kubernetes
 ENV KUBECTL_VERSION=v1.33.10
 # renovate: datasource=github-release-attachments depName=kubernetes/kubernetes digestVersion=v1.33.10

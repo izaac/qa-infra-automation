@@ -110,6 +110,9 @@
     docker build \
       -t playwright-test:{{ executor_tag }} \
       -f "{{ dashboard_dir }}/Dockerfile.ci" \
+      --build-arg NODE_VERSION="{{ nodejs_version }}" \
+      --build-arg PLAYWRIGHT_VERSION="{{ playwright_version }}" \
+      --build-arg YARN_VERSION="{{ yarn_version }}" \
       "{{ dashboard_dir }}"
   changed_when: true
 

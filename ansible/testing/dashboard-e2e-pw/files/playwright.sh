@@ -12,8 +12,8 @@ if ! yarn install --frozen-lockfile --silent; then
 	exit 1
 fi
 
-# Ensure Chromium is available (safety net if image version drifts)
-npx playwright install chromium 2>/dev/null || true
+# Ensure Chrome is available (safety net if image version drifts)
+npx playwright install chrome 2>/dev/null || true
 
 echo "[playwright.sh] node $(node -v), yarn $(yarn --version)"
 echo "[playwright.sh] kubectl $(kubectl version --client -o json 2>/dev/null | grep -o '"gitVersion":"[^"]*"' || echo 'not available')"
