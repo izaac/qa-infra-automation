@@ -13,9 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Yarn (skip if already bundled in base image)
 RUN command -v yarn >/dev/null 2>&1 || npm install -g yarn@${YARN_VERSION}
 
-# Playwright — install Chrome + all its OS deps (--with-deps handles everything)
+# Playwright — install Chromium + headless shell + OS deps
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN npx playwright@${PLAYWRIGHT_VERSION} install --with-deps chrome
+RUN npx playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium
 
 # kubectl
 # renovate: datasource=github-release-attachments depName=kubernetes/kubernetes

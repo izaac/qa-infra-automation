@@ -12,8 +12,8 @@ if ! yarn install --frozen-lockfile --silent; then
 	exit 1
 fi
 
-# Ensure Chrome is available (safety net if image version drifts)
-npx playwright install chrome 2>/dev/null || true
+# Ensure Chromium is available (safety net if image version drifts)
+npx playwright install --force chromium 2>/dev/null || true
 
 echo "[playwright.sh] node $(node -v), yarn $(yarn --version)"
 echo "[playwright.sh] kubectl $(kubectl version --client -o json 2>/dev/null | grep -o '"gitVersion":"[^"]*"' || echo 'not available')"
@@ -24,29 +24,16 @@ export NODE_OPTIONS="--max-old-space-size=4096"
 export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 unset PLAYWRIGHT_CHROMIUM_PATH
 
-# Tags from .env (GREP_TAGS)
-TAGS="${GREP_TAGS:-}"
-echo "[playwright.sh] GREP_TAGS=${TAGS}"
+# GREP_TAGS is parsed by playwright.config.ts (supports Cypress-style +/-@ syntax).
+# Do NOT pass --grep on the CLI — it would override the config's parseGrepTags().
+echo "[playwright.sh] GREP_TAGS=${GREP_TAGS:-<none>}"
 
-# Build grep args for tag filtering
-GREP_ARGS=()
-if [ -n "$TAGS" ]; then
-	GREP_ARGS=(--grep "$TAGS")
-fi
-
-# Run Playwright
+# Run Playwright (base config — no jenkins override needed)
 set +e
-npx playwright test \
-	--config=playwright.config.jenkins.ts \
-	"${GREP_ARGS[@]}"
+npx playwright test "$@"
 EXIT_CODE=$?
 set -e
 
 echo "PLAYWRIGHT EXIT CODE: $EXIT_CODE"
-
-# Copy JUnit results to root for collection
-if [ -f "test-results/results.xml" ]; then
-	cp test-results/results.xml results.xml
-fi
 
 exit $EXIT_CODE

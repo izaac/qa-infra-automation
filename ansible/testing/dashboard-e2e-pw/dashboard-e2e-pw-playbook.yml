@@ -1,9 +1,9 @@
 ---
-# Playwright E2E Pipeline — adapted from ../dashboard-e2e/ for Playwright tests.
+# Playwright E2E Pipeline for izaac/dashboard-e2e-pw.
 #
 # Stages (controlled via --tags / --skip-tags):
-#   provision  →  EC2 + DNS + K3s + Rancher (reused from dashboard-e2e)
-#   setup      →  clone dashboard-e2e-pw, build Docker image
+#   provision  →  EC2 + DNS + K3s + Rancher
+#   setup      →  clone dashboard-e2e-pw, build Docker image, generate .env
 #   test       →  run Playwright inside Docker container
 #   cleanup    →  destroy tofu workspaces (requires --tags cleanup)
 #
@@ -11,7 +11,7 @@
 #   Full pipeline:   ansible-playbook dashboard-e2e-pw-playbook.yml --tags provision,setup,test
 #   Infra only:      ansible-playbook dashboard-e2e-pw-playbook.yml --tags provision
 #   Re-run tests:    ansible-playbook dashboard-e2e-pw-playbook.yml --tags setup,test
-#   Existing host:   ansible-playbook dashboard-e2e-pw-playbook.yml --tags setup,test
+#   Existing host:   ansible-playbook dashboard-e2e-pw-playbook.yml -e rancher_host=my.host --tags setup,test
 #   Destroy:         ansible-playbook dashboard-e2e-pw-playbook.yml --tags cleanup
 - name: Playwright E2E Pipeline
   hosts: localhost
@@ -43,7 +43,7 @@
     # Ansible verbosity passthrough
     ansible_verbose_flag: "{{ '-' + 'v' * ((ansible_verbosity | int) - 1) if (ansible_verbosity | default(0) | int) > 1 else '' }}"
 
-    # Executor-scoped image tag
+    # Executor-scoped image tag (prevents concurrent Jenkins builds from clobbering each other)
     executor_tag: "{{ lookup('env', 'EXECUTOR_NUMBER') | default('0', true) }}"
 
   pre_tasks:
@@ -107,7 +107,7 @@
         that:
           - rancher_host is defined
           - rancher_host | length > 0
-        fail_msg: "rancher_host is required when job_type=existing. Set it in vars.yaml."
+        fail_msg: "rancher_host is required when job_type=existing. Set it in vars.yaml or -e rancher_host=..."
       when: job_type == 'existing' and 'cleanup' not in ansible_run_tags
       tags: [always]
 
@@ -127,13 +127,19 @@
 
     - name: Display pipeline info
       ansible.builtin.debug:
-        msg: "Playwright E2E Pipeline — job_type={{ job_type }}, image_tag={{ rancher_image_tag }}, prefix={{ prefix }}"
+        msg: >-
+          Playwright E2E Pipeline —
+          job_type={{ job_type }},
+          image_tag={{ rancher_image_tag }},
+          tags={{ playwright_tags }},
+          branch={{ dashboard_branch }},
+          prefix={{ prefix }}
       tags: [always]
 
   tasks:
     - name: Provision infrastructure
       ansible.builtin.include_tasks:
-        file: ../dashboard-e2e/tasks/provision.yml
+        file: tasks/provision.yml
         apply:
           tags: [provision]
       when: job_type == 'recurring' or (create_initial_clusters | bool)
@@ -141,14 +147,14 @@
 
     - name: Resolve Rancher helm version
       ansible.builtin.include_tasks:
-        file: ../dashboard-e2e/tasks/resolve-helm-version.yml
+        file: tasks/resolve-helm-version.yml
         apply:
           tags: [provision, setup]
       tags: [provision, setup]
 
     - name: Install K3s and deploy Rancher
       ansible.builtin.include_tasks:
-        file: ../dashboard-e2e/tasks/install-k3s-rancher.yml
+        file: tasks/install-k3s-rancher.yml
         apply:
           tags: [provision]
       when: job_type == 'recurring' or (create_initial_clusters | bool)
@@ -183,7 +189,7 @@
 
     - name: Cleanup infrastructure
       ansible.builtin.include_tasks:
-        file: ../dashboard-e2e/tasks/cleanup.yml
+        file: tasks/cleanup.yml
         apply:
           tags: [cleanup, never]
       tags: [cleanup, never]

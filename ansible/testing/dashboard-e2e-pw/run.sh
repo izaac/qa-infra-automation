@@ -6,9 +6,10 @@
 #   ./run.sh                          # full pipeline (provision → test → cleanup)
 #   ./run.sh provision                # provision infra only
 #   ./run.sh setup                    # clone repo + build test image
-#   ./run.sh test                     # re-run tests only
+#   ./run.sh test                     # re-run tests (via ansible, no live output)
+#   ./run.sh stream                   # setup + test with live Playwright output
+#   ./run.sh stream provision         # provision + setup + test, live output
 #   ./run.sh provision setup          # provision + setup (no test)
-#   ./run.sh setup test               # setup + test (most common)
 #   ./run.sh provision setup test     # everything except cleanup
 #   ./run.sh destroy                  # tear down infrastructure
 #   ./run.sh build                    # rebuild the runner image
@@ -72,13 +73,7 @@ detect_socket() {
 build_image() {
 	if ! $RUNTIME image inspect "$IMAGE_NAME" >/dev/null 2>&1 || [ "${_FORCE_BUILD:-}" = "1" ]; then
 		echo "[run] Building ${IMAGE_NAME} image..."
-
-		# Use sibling Dockerfile.quickstart if it exists, otherwise minimal build
-		if [ -f "${SCRIPT_DIR}/../dashboard-e2e/Dockerfile.quickstart" ]; then
-			$RUNTIME build -f "${SCRIPT_DIR}/../dashboard-e2e/Dockerfile.quickstart" -t "$IMAGE_NAME" "${SCRIPT_DIR}/../dashboard-e2e"
-		else
-			$RUNTIME build -f "${SCRIPT_DIR}/files/Dockerfile.ci" -t "$IMAGE_NAME" "$SCRIPT_DIR"
-		fi
+		$RUNTIME build -f "${SCRIPT_DIR}/Dockerfile.quickstart" -t "$IMAGE_NAME" "$SCRIPT_DIR"
 	fi
 }
 
@@ -109,6 +104,7 @@ run_playbook() {
 		-e HOST_DASHBOARD_DIR="${SCRIPT_DIR}/dashboard-e2e-pw" \
 		-e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" \
 		-e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" \
+		-e GH_TOKEN="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}" \
 		"$IMAGE_NAME" \
 		--extra-vars "@/playbook/.creds.yml" \
 		"$@"
@@ -116,17 +112,53 @@ run_playbook() {
 	rm -f "${_creds_file}"
 }
 
+# --- Stream Playwright tests with live output ---
+stream_playwright() {
+	echo ""
+	echo "[run] Streaming Playwright tests..."
+	echo ""
+
+	if ! $RUNTIME image inspect "playwright-test:${EXECUTOR_TAG:-0}" >/dev/null 2>&1; then
+		echo "ERROR: playwright-test:${EXECUTOR_TAG:-0} image not found — run setup first" >&2
+		exit 1
+	fi
+	if [ ! -f "${SCRIPT_DIR}/.env" ]; then
+		echo "ERROR: .env not found — run setup first" >&2
+		exit 1
+	fi
+
+	_host="$(grep '^rancher_host:' "$VARS_FILE" 2>/dev/null | head -1 | sed "s/^rancher_host:[[:space:]]*//" | tr -d "\"'" || echo "playwright-e2e")"
+	_name="playwright-$(echo "$_host" | sed 's/[^a-zA-Z0-9_.-]/-/g')"
+	$RUNTIME rm -f "$_name" 2>/dev/null || true
+
+	# Extra args after "stream" are forwarded via entrypoint → playwright.sh "$@" → npx playwright test "$@"
+	exec $RUNTIME run --rm -it \
+		--name "$_name" \
+		--shm-size=2g \
+		--env-file "${SCRIPT_DIR}/.env" \
+		-v "${SCRIPT_DIR}/dashboard-e2e-pw:/e2e" \
+		-w /e2e \
+		"playwright-test:${EXECUTOR_TAG:-0}" \
+		"$@"
+}
+
 # --- Main ---
 detect_runtime
 detect_socket
 
 TAGS=""
+STREAM=""
 _FORCE_BUILD=""
 _BUILD_ONLY=""
+EXECUTOR_TAG="${EXECUTOR_NUMBER:-0}"
 while [ $# -gt 0 ]; do
 	case "$1" in
 	provision | setup | test)
 		TAGS="${TAGS:+${TAGS},}$1"
+		shift
+		;;
+	stream)
+		STREAM=1
 		shift
 		;;
 	destroy)
@@ -143,7 +175,7 @@ while [ $# -gt 0 ]; do
 		if [ -f "$_report" ]; then
 			open "$_report" 2>/dev/null || xdg-open "$_report" 2>/dev/null || echo "$_report"
 		else
-			echo "No report found. Run tests first: ./run.sh setup test"
+			echo "No report found. Run tests first: ./run.sh stream"
 		fi
 		exit 0
 		;;
@@ -165,6 +197,11 @@ while [ $# -gt 0 ]; do
 		;;
 	esac
 done
+
+# stream without explicit stages defaults to setup,test
+if [ -n "$STREAM" ] && [ -z "$TAGS" ]; then
+	TAGS="setup,test"
+fi
 
 if [ ! -f "$VARS_FILE" ]; then
 	echo "" >&2
@@ -201,5 +238,12 @@ if [ -n "$TAGS" ]; then
 	TAG_ARGS="--tags ${TAGS}"
 fi
 
-# shellcheck disable=SC2086
-run_playbook ${TAG_ARGS} "$@"
+if [ -n "$STREAM" ]; then
+	# Run everything except test via playbook, then stream Playwright directly
+	# shellcheck disable=SC2086
+	run_playbook --skip-tags test ${TAG_ARGS}
+	stream_playwright "$@"
+else
+	# shellcheck disable=SC2086
+	run_playbook ${TAG_ARGS} "$@"
+fi

@@ -1,0 +1,5 @@
+RANCHER_VERSION=2.13.3-rc3
+RANCHER_IMAGE_TAG=v2.13-head
+RANCHER_CHART_URL=https://releases.rancher.com/server-charts/latest
+RANCHER_HELM_REPO=rancher-com-rc
+PLAYWRIGHT_TAGS=@generic+-@prime+-@noVai

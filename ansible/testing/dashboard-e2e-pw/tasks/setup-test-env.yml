@@ -11,16 +11,43 @@
   retries: 30
   delay: 10
 
+- name: Detect test repo branch from Rancher version
+  ansible.builtin.set_fact:
+    target_branch: >-
+      {%- if rancher_image_tag == 'head' -%}
+        main
+      {%- elif rancher_image_tag is match('^v(\d+\.\d+)') -%}
+        release-{{ rancher_image_tag | regex_replace('^v(\d+\.\d+).*$', '\1') }}
+      {%- else -%}
+        {{ dashboard_branch | default('main') }}
+      {%- endif -%}
+
+- name: Show detected branch
+  ansible.builtin.debug:
+    msg: "rancher_image_tag={{ rancher_image_tag }} → target_branch={{ target_branch }}"
+
 - name: Remove old test repo checkout
   ansible.builtin.file:
     path: "{{ dashboard_dir }}"
     state: absent
 
+- name: Build clone URL (with token if available for private repos)
+  ansible.builtin.set_fact:
+    _clone_url: >-
+      {%- set token = lookup('env', 'GH_TOKEN') -%}
+      {%- set repo = dashboard_repo | regex_replace('\.git$', '') -%}
+      {%- if token | length > 0 -%}
+        https://{{ token }}@github.com/{{ repo }}.git
+      {%- else -%}
+        https://github.com/{{ repo }}.git
+      {%- endif -%}
+  no_log: true
+
 - name: Clone Playwright E2E repo
   ansible.builtin.git:
-    repo: "https://github.com/{{ dashboard_repo | regex_replace('\\.git$', '') }}.git"
+    repo: "{{ _clone_url }}"
     dest: "{{ dashboard_dir }}"
-    version: "{{ dashboard_branch }}"
+    version: "{{ target_branch }}"
     depth: 1
   retries: 3
   delay: 10
@@ -120,4 +147,4 @@
   ansible.builtin.template:
     src: env.j2
     dest: "{{ workspace_dir }}/.env"
-    mode: "0600"
+    mode: "0644"

@@ -31,7 +31,9 @@ dashboard_repo: "izaac/dashboard-e2e-pw"
 dashboard_branch: "main"
 
 # --- Playwright ---
-playwright_tags: "@provisioning+@adminUser"
+# Tag syntax: "@tag" to include, "-@tag" to exclude, "+" to separate
+# Examples: "@adminUser", "@standardUser+-@prime+-@noVai"
+playwright_tags: "@adminUser+-@prime+-@noVai"
 playwright_version: "1.52.0"
 
 # --- Job type ---
