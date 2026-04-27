@@ -13,6 +13,7 @@
 - name: Run Cypress tests in Docker
   ansible.builtin.shell: |
     docker run --rm -t --init \
+      --platform linux/amd64 \
       --name "cypress-{{ executor_tag }}-{{ prefix | default('local') | lower | regex_replace('[^a-z0-9_.-]', '-') }}-{{ rancher_host | default('dashboard-e2e') | lower | regex_replace('[^a-z0-9_.-]', '-') }}" \
       --shm-size=2g \
       --env-file "{{ workspace_dir }}/.env" \

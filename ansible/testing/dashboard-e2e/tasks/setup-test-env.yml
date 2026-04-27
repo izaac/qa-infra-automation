@@ -196,6 +196,7 @@
   ansible.builtin.shell: |
     set -e
     docker build \
+      --platform linux/amd64 \
       -t dashboard-test:{{ executor_tag }} \
       -f "{{ dashboard_dir }}/cypress/jenkins/Dockerfile.ci" \
       --build-arg YARN_VERSION="{{ yarn_version }}" \
