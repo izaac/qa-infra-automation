@@ -1,0 +1,60 @@
+# Run Playwright inside Docker and collect results.
+# The container runs jenkins/playwright.sh which executes
+#   `npx playwright test --config=playwright.config.jenkins.ts --grep <tags>`
+# Playwright writes JUnit XML to e2e/jenkins/reports/junit/results.xml
+# and an HTML report to playwright-report/. After the container exits,
+# both are copied to the workspace for Jenkins artifact capture.
+
+- name: Run Playwright tests in Docker
+  ansible.builtin.shell: |
+    docker run --rm -t --init \
+      --name "playwright-{{ executor_tag }}-{{ prefix | default('local') | lower | regex_replace('[^a-z0-9_.-]', '-') }}-{{ rancher_host | default('dashboard-e2e-pw') | lower | regex_replace('[^a-z0-9_.-]', '-') }}" \
+      --shm-size=2g \
+      --env-file "{{ workspace_dir }}/.env" \
+      -v "{{ host_dashboard_dir }}:/e2e" \
+      -w /e2e \
+      dashboard-pw-test:{{ executor_tag }}
+  register: pw_result
+  failed_when: false
+  changed_when: true
+
+- name: Log Docker errors on non-zero exit
+  ansible.builtin.debug:
+    msg: "{{ pw_result.stderr_lines | default([]) }}"
+  when: (pw_result.rc | default(1)) != 0 and (pw_result.stderr_lines | default([]) | length > 0)
+
+- name: Fix dashboard-e2e-pw permissions after Docker run
+  ansible.builtin.shell: |
+    chown -R "$(id -u):$(id -g)" "{{ dashboard_dir }}" 2>/dev/null || true
+  changed_when: false
+
+- name: Set test exit code
+  ansible.builtin.set_fact:
+    pw_exit_code: "{{ pw_result.rc | default(1) }}"
+
+- name: Check results.xml exists
+  ansible.builtin.stat:
+    path: "{{ dashboard_dir }}/e2e/jenkins/reports/junit/results.xml"
+  register: results_xml
+
+- name: Copy results.xml to workspace
+  ansible.builtin.copy:
+    src: "{{ dashboard_dir }}/e2e/jenkins/reports/junit/results.xml"
+    dest: "{{ workspace_dir }}/results.xml"
+    remote_src: true
+    mode: "0644"
+  when: results_xml.stat.exists
+
+- name: Copy HTML report to workspace
+  ansible.builtin.shell: |
+    mkdir -p {{ workspace_dir }}/html
+    cp -r {{ dashboard_dir }}/playwright-report/* {{ workspace_dir }}/html/ 2>/dev/null || true
+  changed_when: false
+
+- name: Report test status
+  ansible.builtin.debug:
+    msg: >-
+      Playwright tests {{ 'PASSED' if pw_exit_code | int == 0 else 'FAILED' }}
+      (exit code: {{ pw_exit_code }}){{
+      ' — results.xml copied to ' + workspace_dir + '/results.xml'
+      if results_xml.stat.exists else '' }}

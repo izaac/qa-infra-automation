@@ -1,0 +1,26 @@
+# Playwright base image with browsers + Node.js bundled.
+# See https://playwright.dev/docs/docker for available tags.
+ARG PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright:v1.49.0-noble
+FROM ${PLAYWRIGHT_IMAGE}
+
+# renovate: datasource=github-release-attachments depName=kubernetes/kubernetes
+ENV KUBECTL_VERSION=v1.33.10
+# renovate: datasource=github-release-attachments depName=kubernetes/kubernetes digestVersion=v1.33.10
+ENV KUBECTL_SUM=f156acb753ee4366789ab7a663916eb580e7ee1b9e449bc9b052181db524e3f5
+
+RUN wget -q "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -O /tmp/kubectl && \
+    echo "${KUBECTL_SUM}  /tmp/kubectl" | sha256sum -c - && \
+    mv /tmp/kubectl /bin/kubectl && \
+    chmod +x /bin/kubectl
+
+# curl is required by the imported-cluster registration command
+# (`curl --insecure -sfL <manifest> | kubectl apply -f -`) executed by
+# e2e/tests/pages/manager/cluster-manager.spec.ts.
+RUN apt-get update && apt-get install -y --no-install-recommends curl openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /root/.kube
+
+COPY imported_config /root/.kube/config
+
+WORKDIR /e2e
+ENTRYPOINT ["bash", "jenkins/playwright.sh"]
