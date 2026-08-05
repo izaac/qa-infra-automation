@@ -65,6 +65,8 @@ interface CypressFailedAttempt {
 /** Number of stack frames to show. Enough to locate the failure without burying the message */
 const STACK_FRAMES = 5;
 
+let loggedAttempts = 0;
+
 const indentLines = (text: string, prefix: string): string => text
   .split('\n')
   .map((line) => `${ prefix }${ line.trim() }`)
@@ -111,10 +113,22 @@ const formatFailedCypressAttempt = (failure: CypressFailedAttempt): string => {
  * side error has its whole trail collapsed away, which is exactly the failure
  * that needs the trail. A tail is bounded whatever the failure looks like.
  */
-const MAX_LOG_ENTRIES = Number(process.env.CYPRESS_MAX_LOG_ENTRIES || 50);
+const MAX_LOG_ENTRIES = Number(process.env.CYPRESS_MAX_LOG_ENTRIES || 30);
 
 /** Cap on the lines of a single entry, so one stack trace cannot fill the tail */
 const MAX_ENTRY_LINES = 4;
+
+/**
+ * A full run is several hundred tests, so a per test cap bounds nothing on its
+ * own: a systemic failure would emit a trail for every one of them. The first
+ * failures of a run are the ones worth reading, the rest are usually the same
+ * cause again, so stop after this many and say so. Together with the caps above
+ * this holds the whole run to a few hundred lines however badly it goes.
+ */
+const MAX_LOGGED_FAILURES = Number(process.env.CYPRESS_MAX_LOGGED_FAILURES || 10);
+
+/** Same reasoning for the retried attempts, which are reported per attempt */
+const MAX_LOGGED_ATTEMPTS = Number(process.env.CYPRESS_MAX_LOGGED_ATTEMPTS || 20);
 
 /**
  * cypress-terminal-report has no notion of the retry attempt: it reports a
@@ -124,6 +138,7 @@ const MAX_ENTRY_LINES = 4;
  * failure is printed, which is the one that ran against clean state.
  */
 const printedFailures = new Set<string>();
+let failureBudgetReported = false;
 
 const printFirstFailedAttempt = (
   { spec, test, state }: { spec: string; test: string; state: string },
@@ -141,6 +156,18 @@ const printFirstFailedAttempt = (
   }
 
   printedFailures.add(key);
+
+  if (printedFailures.size > MAX_LOGGED_FAILURES) {
+    if (!failureBudgetReported) {
+      failureBudgetReported = true;
+      console.log('');
+      console.log(`  (Browser logs) suppressed after ${ MAX_LOGGED_FAILURES } failed tests.`);
+      console.log('  Raise CYPRESS_MAX_LOGGED_FAILURES to see more, or read browser-logs/out.html.');
+      console.log('');
+    }
+
+    return;
+  }
 
   const dropped = Math.max(0, messages.length - MAX_LOG_ENTRIES);
   const tail = dropped > 0 ? messages.slice(-MAX_LOG_ENTRIES) : messages;
@@ -415,9 +442,19 @@ export default defineConfig({
         // Prints a retried test's failure to the terminal. Without this only the
         // last attempt's error is shown, because mocha's spec reporter handles
         // `fail` and ignores `retry`. Ported from rancher/dashboard#18579, which
-        // release branches do not carry.
+        // release branches do not carry. Budgeted, because a run is several
+        // hundred tests and each one reports up to `retries.runMode + 1` times.
         logFailedAttempt: (failure: CypressFailedAttempt) => {
-          console.log(formatFailedCypressAttempt(failure));
+          loggedAttempts++;
+
+          if (loggedAttempts <= MAX_LOGGED_ATTEMPTS) {
+            console.log(formatFailedCypressAttempt(failure));
+          } else if (loggedAttempts === MAX_LOGGED_ATTEMPTS + 1) {
+            console.log('');
+            console.log(`  (Attempts) suppressed after ${ MAX_LOGGED_ATTEMPTS } reported attempts.`);
+            console.log('  Raise CYPRESS_MAX_LOGGED_ATTEMPTS to see more.');
+            console.log('');
+          }
 
           // Cypress tasks must not return undefined
           return null;
