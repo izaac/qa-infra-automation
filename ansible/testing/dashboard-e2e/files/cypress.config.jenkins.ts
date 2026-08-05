@@ -45,6 +45,113 @@ const sampleCpuPercent = (sampleMs = 100): Promise<number> => new Promise((resol
 });
 
 /**
+ * A failed attempt of a retried test, sent from the `afterEach` in
+ * `cypress/support/e2e.ts` to the `logFailedAttempt` task below.
+ */
+interface CypressFailedAttempt {
+  /** Spec file the test belongs to, relative to the project root */
+  spec: string;
+  /** Full title of the test, including the enclosing describe blocks */
+  title: string;
+  /** 1 based attempt number */
+  attempt: number;
+  /** Total number of attempts the test is allowed */
+  totalAttempts: number;
+  name?: string;
+  message?: string;
+  stack?: string;
+}
+
+/** Number of stack frames to show. Enough to locate the failure without burying the message */
+const STACK_FRAMES = 5;
+
+const indentLines = (text: string, prefix: string): string => text
+  .split('\n')
+  .map((line) => `${ prefix }${ line.trim() }`)
+  .join('\n');
+
+/**
+ * Format a single failed attempt as a block of terminal output. Ported from
+ * rancher/dashboard#18579 so release branches, which run this config instead of
+ * the checkout's own, get the same output as master.
+ */
+const formatFailedCypressAttempt = (failure: CypressFailedAttempt): string => {
+  const {
+    spec, title, attempt, totalAttempts, name, message, stack
+  } = failure;
+
+  const lines = [
+    '',
+    `  (Attempt ${ attempt } of ${ totalAttempts }) ${ title }`,
+    `  ${ spec }`
+  ];
+
+  const error = [name, message].filter((part) => !!part).join(': ');
+
+  if (error) {
+    lines.push(indentLines(error, '      '));
+  }
+
+  // Cypress error stacks repeat the message in their leading lines, so only keep the frames
+  (stack || '')
+    .split('\n')
+    .filter((line) => line.trim().startsWith('at '))
+    .slice(0, STACK_FRAMES)
+    .forEach((frame) => lines.push(indentLines(frame, '      ')));
+
+  lines.push('');
+
+  return lines.join('\n');
+};
+
+/**
+ * Number of log entries kept either side of each error when compacting a failed
+ * test's trail. Enough to show what the UI was doing when it broke without
+ * emitting every Steve request the dashboard made.
+ */
+const COMPACT_LOG_CONTEXT = 20;
+
+/**
+ * cypress-terminal-report has no notion of the retry attempt: it reports a
+ * retried test once per attempt under the same title, so printing on failure
+ * repeats the whole trail up to `retries.runMode + 1` times. Only the first
+ * failure is printed here, which is the one that ran against clean state.
+ *
+ * Passed to the printer as `collectTestLogs`, so the entries have already been
+ * compacted by `compactLogs`.
+ */
+const printedFailures = new Set<string>();
+
+const printFirstFailedAttempt = (
+  { spec, test, state }: { spec: string; test: string; state: string },
+  messages: { type: string; message: string; severity: string }[]
+) => {
+  if (state === 'passed') {
+    return;
+  }
+
+  const key = `${ spec }::${ test }`;
+
+  if (printedFailures.has(key)) {
+    return;
+  }
+
+  printedFailures.add(key);
+
+  console.log('');
+  console.log(`  (Browser logs) ${ test }`);
+  console.log(`  ${ spec }`);
+
+  messages.forEach(({ type, message, severity }) => {
+    const label = severity === 'error' ? `${ type } !` : type;
+
+    console.log(`      ${ label } ${ `${ message }`.replace(/\n/g, '\n      ') }`);
+  });
+
+  console.log('');
+};
+
+/**
  * LOGS:
  * Summary of the environment variables that we have detected (or are going ot use)
  * We won't show any passwords
@@ -290,8 +397,23 @@ export default defineConfig({
             memory:     `${ (usedMem / 1024 / 1024).toFixed(2) }MB (${ (usedMem / totalMem * 100).toFixed(2) }%)`,
             processCpu: `${ (await sampleCpuPercent()).toFixed(2) }%`
           };
+        },
+        // Prints a retried test's failure to the terminal. Without this only the
+        // last attempt's error is shown, because mocha's spec reporter handles
+        // `fail` and ignores `retry`. Ported from rancher/dashboard#18579, which
+        // release branches do not carry.
+        logFailedAttempt: (failure: CypressFailedAttempt) => {
+          console.log(formatFailedCypressAttempt(failure));
+
+          // Cypress tasks must not return undefined
+          return null;
         }
       });
+
+      // Guards the `afterEach` that calls `logFailedAttempt`, so a checkout that
+      // ships the hook without this config never calls an unregistered task.
+      config.env.hasRetryLogging = true;
+
       websocketTasks(on, config);
 
       require('cypress-terminal-report/src/installLogsPrinter')(on, {
@@ -300,7 +422,14 @@ export default defineConfig({
         // Disabled in Jenkins config only to prevent conflict with cypress-mochawesome-reporter's after:run hook
         // Both plugins use after:run; this prevents Cypress from exiting before HTML reports are generated
         logToFilesOnAfterRun: false,
+        // Printing is handled by `collectTestLogs` below, which prints only the
+        // first failed attempt. The plugin's own 'onFail' has no notion of the
+        // retry attempt and would repeat the whole trail once per attempt.
         printLogsToConsole:   'never',
+        // Keep this many entries either side of each error and collapse the rest.
+        // Without it a failed Rancher test emits its entire Steve request trail.
+        compactLogs:          COMPACT_LOG_CONTEXT,
+        collectTestLogs:      printFirstFailedAttempt,
         // printLogsToFile:      'always', // default prints on failures
       });
 

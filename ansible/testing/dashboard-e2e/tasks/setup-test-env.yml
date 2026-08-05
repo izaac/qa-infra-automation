@@ -291,6 +291,68 @@
           {{ _support_text.splitlines() | select('search', '@cypress/grep') | join(' / ') }}
       when: _grep_major | int >= 5
 
+# The Jenkins config registers a `logFailedAttempt` task so a retried test shows
+# every attempt, not just the last (rancher/dashboard#18579). master calls that
+# task from its own support file; release branches predate the change, so the
+# hook is appended here. Tests that disable retries are unaffected: the hook
+# returns early when only one attempt was allowed.
+- name: Add the retry logging hook to branches that lack it
+  when: dashboard_src is not defined
+  vars:
+    _support_file: "{{ dashboard_dir }}/cypress/support/e2e.ts"
+  block:
+    - name: Read the Cypress support file for retry logging
+      ansible.builtin.slurp:
+        src: "{{ _support_file }}"
+      register: _retry_support
+
+    - name: Append the retry logging hook
+      ansible.builtin.blockinfile:
+        path: "{{ _support_file }}"
+        marker: "// {mark} qa-infra retry logging"
+        insertafter: EOF
+        block: |
+          /**
+           * Cypress retries a failed test, but the terminal reporter only shows the error from
+           * the last attempt. Send every failed attempt to the node process so they all appear
+           * in the terminal. The task is registered by the Jenkins Cypress config, which sets
+           * `hasRetryLogging`; without it this hook does nothing.
+           */
+          afterEach(function() {
+            // A regular function, so that `this.currentTest` is in scope.
+            if (this.currentTest?.state !== 'failed' || !Cypress.env('hasRetryLogging')) {
+              return;
+            }
+
+            let failure;
+
+            try {
+              const test = this.currentTest;
+              const totalAttempts = test.retries() + 1;
+
+              if (totalAttempts <= 1) {
+                // Retries are disabled for this test, so the reporter is already complete
+                return;
+              }
+
+              failure = {
+                spec:    Cypress.spec.relative,
+                title:   test.titlePath().join(' > '),
+                attempt: test.currentRetry() + 1,
+                totalAttempts,
+                name:    test.err?.name,
+                message: test.err?.message,
+                stack:   test.err?.stack,
+              };
+            } catch (e) {
+              // Never fail this hook, doing so would skip all remaining tests in the spec
+              return;
+            }
+
+            cy.task('logFailedAttempt', failure, { log: false });
+          });
+      when: (_retry_support.content | b64decode) is not search('logFailedAttempt')
+
 - name: Configure Rancher users and role bindings
   ansible.builtin.include_role:
     name: rancher_user_setup
