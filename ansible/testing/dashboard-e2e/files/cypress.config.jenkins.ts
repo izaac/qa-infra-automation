@@ -113,9 +113,10 @@ const COMPACT_LOG_CONTEXT = 20;
 
 /**
  * cypress-terminal-report has no notion of the retry attempt: it reports a
- * retried test once per attempt under the same title, so printing on failure
- * repeats the whole trail up to `retries.runMode + 1` times. Only the first
- * failure is printed here, which is the one that ran against clean state.
+ * retried test once per attempt, and appends `(Attempt N)` to the title, so
+ * printing on failure repeats the whole trail up to `retries.runMode + 1`
+ * times. The suffix is stripped to key on the test itself, and only the first
+ * failure is printed, which is the one that ran against clean state.
  *
  * Passed to the printer as `collectTestLogs`, so the entries have already been
  * compacted by `compactLogs`.
@@ -130,7 +131,8 @@ const printFirstFailedAttempt = (
     return;
   }
 
-  const key = `${ spec }::${ test }`;
+  const title = test.replace(/\s*\(Attempt \d+\)\s*$/, '');
+  const key = `${ spec }::${ title }`;
 
   if (printedFailures.has(key)) {
     return;
@@ -139,7 +141,7 @@ const printFirstFailedAttempt = (
   printedFailures.add(key);
 
   console.log('');
-  console.log(`  (Browser logs) ${ test }`);
+  console.log(`  (Browser logs) ${ title }`);
   console.log(`  ${ spec }`);
 
   messages.forEach(({ type, message, severity }) => {
