@@ -108,6 +108,17 @@
       password: '{{ rancher_password }}'
       rancher_chart_repo: '{{ rancher_helm_repo }}'
       rancher_chart_repo_url: '{{ rancher_chart_url }}'
+      # `ui-offline-preferred` defaults to `dynamic`: a released image serves the
+      # UI it embeds, but a `-head` image fetches it from releases.rancher.com.
+      # That path is rebuilt from the release branch continuously, so two runs of
+      # the same tag minutes apart can load different UI builds and a failure
+      # cannot be attributed to a change. Forcing it pins the UI to the image
+      # under test. rancher/dashboard's own e2e does the same, in
+      # scripts/e2e-docker-start, on top of mounting its freshly built UI.
+      extra_helm_values:
+        extraEnv:
+          - name: CATTLE_UI_OFFLINE_PREFERRED
+            value: '{{ ui_offline_preferred | default("true") }}'
     dest: "{{ outputs_dir }}/rancher-vars.yaml"
     mode: "0644"
   when: job_type == 'recurring'
@@ -136,3 +147,40 @@
   delay: 10
   changed_when: false
   when: create_initial_clusters | bool
+
+# The setting is driven by CATTLE_UI_OFFLINE_PREFERRED, passed to the chart as
+# extraEnv above. Read it back, because a run that silently fell back to the
+# CDN served UI is not reproducible and its result cannot be trusted.
+- name: Read back which UI Rancher will serve
+  ansible.builtin.command:
+    cmd: >-
+      kubectl --kubeconfig {{ outputs_dir }}/kubeconfig-rancher.yaml
+      get settings.management.cattle.io ui-offline-preferred
+      -o jsonpath={{ '{.value}{"/"}{.default}' | quote }}
+  register: _ui_offline
+  until: _ui_offline.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
+  when: job_type == 'recurring'
+
+- name: Assert Rancher serves the UI embedded in the image
+  vars:
+    # A setting reports both fields: `value` is what an operator set, `default`
+    # is what the deployment was given, which is where CATTLE_ env vars land.
+    # The effective setting is `value` when it is non-empty, otherwise `default`.
+    _parts: "{{ (_ui_offline.stdout | trim).split('/') }}"
+    _effective: "{{ _parts[0] if (_parts[0] | length > 0) else (_parts[1] | default('', true)) }}"
+  ansible.builtin.assert:
+    that: _effective == 'true'
+    success_msg: >-
+      ui-offline-preferred={{ _effective }}, the tests run against the UI
+      embedded in the image under test.
+    fail_msg: >-
+      ui-offline-preferred={{ _effective | default('unset', true) }}, so Rancher
+      may fetch the UI from releases.rancher.com instead of the image. That path
+      is rebuilt from the release branch continuously, so the run would not be
+      reproducible. CATTLE_UI_OFFLINE_PREFERRED did not reach the deployment.
+  when:
+    - job_type == 'recurring'
+    - ui_offline_preferred | default('true') == 'true'
