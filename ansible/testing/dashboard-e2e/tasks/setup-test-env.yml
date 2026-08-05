@@ -301,10 +301,25 @@
   vars:
     _support_file: "{{ dashboard_dir }}/cypress/support/e2e.ts"
   block:
+    - name: Look for the Cypress support file
+      ansible.builtin.stat:
+        path: "{{ _support_file }}"
+      register: _retry_support_stat
+
+    # Debug output is not worth failing a run over, so a checkout that keeps its
+    # support file elsewhere is reported and left alone.
+    - name: Notice when there is no support file to add the hook to
+      ansible.builtin.debug:
+        msg: >-
+          {{ _support_file }} does not exist, so retry logging is not available
+          for this run. A retried test will only report its last attempt.
+      when: not _retry_support_stat.stat.exists
+
     - name: Read the Cypress support file for retry logging
       ansible.builtin.slurp:
         src: "{{ _support_file }}"
       register: _retry_support
+      when: _retry_support_stat.stat.exists
 
     - name: Append the retry logging hook
       ansible.builtin.blockinfile:
@@ -312,6 +327,19 @@
         marker: "// {mark} qa-infra retry logging"
         insertafter: EOF
         block: |
+          /**
+           * The parts of the running mocha test that are needed below. `currentRetry` and
+           * `retries` are typed as protected on mocha's `Runnable`, so they cannot be reached
+           * through `this.currentTest` without casting, and the branches pin different mocha
+           * typings. The cast keeps this compiling on all of them.
+           */
+          interface QaInfraRetryableTest {
+            titlePath(): string[];
+            currentRetry(): number;
+            retries(): number;
+            err?: Error;
+          }
+
           /**
            * Cypress retries a failed test, but the terminal reporter only shows the error from
            * the last attempt. Send every failed attempt to the node process so they all appear
@@ -327,7 +355,7 @@
             let failure;
 
             try {
-              const test = this.currentTest;
+              const test = this.currentTest as unknown as QaInfraRetryableTest;
               const totalAttempts = test.retries() + 1;
 
               if (totalAttempts <= 1) {
@@ -351,7 +379,9 @@
 
             cy.task('logFailedAttempt', failure, { log: false });
           });
-      when: (_retry_support.content | b64decode) is not search('logFailedAttempt')
+      when:
+        - _retry_support_stat.stat.exists
+        - (_retry_support.content | b64decode) is not search('logFailedAttempt')
 
 - name: Configure Rancher users and role bindings
   ansible.builtin.include_role:

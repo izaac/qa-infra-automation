@@ -105,11 +105,16 @@ const formatFailedCypressAttempt = (failure: CypressFailedAttempt): string => {
 };
 
 /**
- * Number of log entries kept either side of each error when compacting a failed
- * test's trail. Enough to show what the UI was doing when it broke without
- * emitting every Steve request the dashboard made.
+ * How many log entries to print for a failed test, counting back from the
+ * failure. `compactLogs` is deliberately not used: it keeps entries around
+ * error severity ones, so a test that fails on an assertion without any browser
+ * side error has its whole trail collapsed away, which is exactly the failure
+ * that needs the trail. A tail is bounded whatever the failure looks like.
  */
-const COMPACT_LOG_CONTEXT = 20;
+const MAX_LOG_ENTRIES = Number(process.env.CYPRESS_MAX_LOG_ENTRIES || 50);
+
+/** Cap on the lines of a single entry, so one stack trace cannot fill the tail */
+const MAX_ENTRY_LINES = 4;
 
 /**
  * cypress-terminal-report has no notion of the retry attempt: it reports a
@@ -117,9 +122,6 @@ const COMPACT_LOG_CONTEXT = 20;
  * printing on failure repeats the whole trail up to `retries.runMode + 1`
  * times. The suffix is stripped to key on the test itself, and only the first
  * failure is printed, which is the one that ran against clean state.
- *
- * Passed to the printer as `collectTestLogs`, so the entries have already been
- * compacted by `compactLogs`.
  */
 const printedFailures = new Set<string>();
 
@@ -140,14 +142,24 @@ const printFirstFailedAttempt = (
 
   printedFailures.add(key);
 
+  const dropped = Math.max(0, messages.length - MAX_LOG_ENTRIES);
+  const tail = dropped > 0 ? messages.slice(-MAX_LOG_ENTRIES) : messages;
+
   console.log('');
   console.log(`  (Browser logs) ${ title }`);
   console.log(`  ${ spec }`);
 
-  messages.forEach(({ type, message, severity }) => {
-    const label = severity === 'error' ? `${ type } !` : type;
+  if (dropped > 0) {
+    console.log(`      [ ${ dropped } earlier entries not shown, last ${ MAX_LOG_ENTRIES } follow ]`);
+  }
 
-    console.log(`      ${ label } ${ `${ message }`.replace(/\n/g, '\n      ') }`);
+  tail.forEach(({ type, message, severity }) => {
+    const label = severity === 'error' ? `${ type } !` : type;
+    const body = `${ message }`.split('\n');
+    const shown = body.slice(0, MAX_ENTRY_LINES).join('\n      ');
+    const rest = body.length > MAX_ENTRY_LINES ? ` ... +${ body.length - MAX_ENTRY_LINES } lines` : '';
+
+    console.log(`      ${ label } ${ shown }${ rest }`);
   });
 
   console.log('');
@@ -428,9 +440,6 @@ export default defineConfig({
         // first failed attempt. The plugin's own 'onFail' has no notion of the
         // retry attempt and would repeat the whole trail once per attempt.
         printLogsToConsole:   'never',
-        // Keep this many entries either side of each error and collapse the rest.
-        // Without it a failed Rancher test emits its entire Steve request trail.
-        compactLogs:          COMPACT_LOG_CONTEXT,
         collectTestLogs:      printFirstFailedAttempt,
         // printLogsToFile:      'always', // default prints on failures
       });
